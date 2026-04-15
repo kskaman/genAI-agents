@@ -1,30 +1,37 @@
 import * as readline from "readline";
 import { v4 as uuidv4 } from "uuid";
 import { chat, closeStore } from "./agent";
+import {
+  cleanupExpiredSessions,
+  initSession,
+  clearMessages,
+  sessionId,
+} from "./sessionStore";
 
-// ── Session ────────────────────────────────────────────────────────────────
-// A new UUID is created each time the CLI starts.
-// The session persists in Redis (survives restarts) until the TTL expires
-// or the user runs /clear.
-let sessionId = uuidv4();
-
-// ── CLI helpers ────────────────────────────────────────────────────────────
+/**
+ *  CLI helpers
+ */
 function printBanner(): void {
   console.log("\n╔══════════════════════════════════════════╗");
-  console.log("║   Conversational Agent  (Stage 1 · CLI)  ║");
-  console.log("╚══════════════════════════════════════════╝");
+  console.log("║   Conversational Agent                   ║");
+  console.log("╚══════════════════════════════════════════╝\n");
   console.log("  Commands:  /session  /clear  /exit /help\n");
   console.log(`  Session ID: ${sessionId}\n`);
 }
 
 function printHelp(): void {
   console.log("  /session  -> show current session ID");
-  console.log("  /clear   -> start a brand-new session (wipes context)");
-  console.log("  /exit    -> quit\n");
+  console.log("  /clear    -> clear conversation (keeps same session)");
+  console.log("  /exit     -> quit and save session");
+  console.log("  /help     -> show this help message\n");
 }
 
-// ── REPL loop ──────────────────────────────────────────────────────────────
+/**
+ * Main function to run the conversational agent CLI
+ */
 async function main(): Promise<void> {
+  cleanupExpiredSessions(); // Clean up old sessions on startup
+  initSession(uuidv4()); // Initialize new session
   printBanner();
 
   const rl = readline.createInterface({
@@ -38,7 +45,7 @@ async function main(): Promise<void> {
   rl.on("line", async (line: string) => {
     const input = line.trim();
 
-    // ── Built-in commands ──────────────────────────────────────────────────
+    // Built-in commands
     if (!input) {
       rl.prompt();
       return;
@@ -47,7 +54,6 @@ async function main(): Promise<void> {
     if (input === "/exit") {
       console.log("\nBye!\n");
       rl.close();
-      await closeStore();
       process.exit(0);
     }
 
@@ -58,8 +64,8 @@ async function main(): Promise<void> {
     }
 
     if (input === "/clear") {
-      sessionId = uuidv4();
-      console.log(`\n  New session started: ${sessionId}\n`);
+      clearMessages();
+      console.log(`\n  Conversation cleared\n`);
       rl.prompt();
       return;
     }
@@ -70,19 +76,25 @@ async function main(): Promise<void> {
       return;
     }
 
-    // ── Send message to agent ──────────────────────────────────────────────
+    // Send message to agent
     try {
-      // Pause prompt while waiting so output isn't interleaved
+      // Show loading indicator
+      process.stdout.write("AI:  Thinking...");
+
+      const reply = await chat(input);
+
+      // Clear the "Thinking..." line and show response
+      process.stdout.write("\r\x1b[K"); // Clear current line
       process.stdout.write("AI:  ");
-      const reply = await chat(input, sessionId);
       console.log(reply + "\n");
     } catch (err: unknown) {
+      process.stdout.write("\r\x1b[K"); // Clear "Thinking..." line
       const message = err instanceof Error ? err.message : String(err);
       console.error(`\n[Error] ${message}\n`);
       console.error(
         "  Make sure Ollama is running: https://ollama.com\n" +
           `  And the model is pulled:    ollama pull ${process.env.OLLAMA_MODEL ?? "llama3.2:3b"}\n` +
-          "\n  Note: Sessions are persisted to .sessions/ folder and survive restarts.\n",
+          "\n  Note: Sessions are persisted to .sessions/ folder on exit.\n",
       );
     }
 

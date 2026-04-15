@@ -1,240 +1,119 @@
 import * as fs from "fs";
 import * as path from "path";
-import {
-  BaseMessage,
-  StoredMessage,
-  HumanMessage,
-  AIMessage,
-  mapStoredMessageToChatMessage,
-  mapChatMessagesToStoredMessages,
-} from "@langchain/core/messages";
-import { BaseChatMessageHistory } from "@langchain/core/chat_history";
-
 import { config } from "./config";
 
-// ── Session file structure ──────────────────────────────────────────────────
-interface SessionFile {
-  sessionId: string;
-  createdAt: number;
-  lastAccessed: number;
-  messages: StoredMessage[]; // Serialized messages
+// Types
+
+export interface Message {
+  role: "user" | "assistant" | "system";
+  content: string;
 }
 
-// ── File-based Chat Message History ────────────────────────────────────────
-class FileChatMessageHistory extends BaseChatMessageHistory {
-  lc_namespace = ["langchain", "stores", "message", "file"];
+// Session State (Plain Variables)
 
-  private sessionId: string;
-  private filePath: string;
-  private messages: BaseMessage[] = [];
+export let sessionId: string = "";
+export let createdAt: number = 0;
+export let messages: Message[] = [];
 
-  constructor(sessionId: string) {
-    super();
-    this.sessionId = sessionId;
-    this.filePath = getSessionFilePath(sessionId);
-    this.loadFromFile();
-  }
+// Session Management
 
-  async getMessages(): Promise<BaseMessage[]> {
-    return this.messages;
-  }
-
-  async addMessage(message: BaseMessage): Promise<void> {
-    this.messages.push(message);
-    await this.saveToFile();
-  }
-
-  async addUserMessage(message: string): Promise<void> {
-    await this.addMessage(new HumanMessage(message));
-  }
-
-  async addAIChatMessage(message: string): Promise<void> {
-    await this.addMessage(new AIMessage(message));
-  }
-
-  async clear(): Promise<void> {
-    this.messages = [];
-    await this.saveToFile();
-  }
-
-  private loadFromFile(): void {
-    if (fs.existsSync(this.filePath)) {
-      try {
-        const data = fs.readFileSync(this.filePath, "utf-8");
-        const sessionFile: SessionFile = JSON.parse(data);
-
-        // Deserialize messages
-        this.messages = sessionFile.messages.map(mapStoredMessageToChatMessage);
-
-        // Update last accessed time
-        sessionFile.lastAccessed = Date.now();
-        fs.writeFileSync(this.filePath, JSON.stringify(sessionFile, null, 2));
-      } catch (error) {
-        console.error(
-          `[SessionStore] Error loading session ${this.sessionId}:`,
-          error,
-        );
-        this.messages = [];
-      }
-    }
-  }
-
-  private async saveToFile(): Promise<void> {
-    const sessionFile: SessionFile = {
-      sessionId: this.sessionId,
-      createdAt: this.getCreatedAt(),
-      lastAccessed: Date.now(),
-      messages: mapChatMessagesToStoredMessages(this.messages),
-    };
-
-    try {
-      // Ensure directory exists
-      ensureSessionDirExists();
-
-      fs.writeFileSync(this.filePath, JSON.stringify(sessionFile, null, 2));
-    } catch (error) {
-      console.error(
-        `[SessionStore] Error saving session ${this.sessionId}:`,
-        error,
-      );
-    }
-  }
-
-  private getCreatedAt(): number {
-    if (fs.existsSync(this.filePath)) {
-      try {
-        const data = fs.readFileSync(this.filePath, "utf-8");
-        const sessionFile: SessionFile = JSON.parse(data);
-        return sessionFile.createdAt;
-      } catch {
-        return Date.now();
-      }
-    }
-    return Date.now();
-  }
+/**
+ * Initialize a new session
+ */
+export function initSession(id: string): void {
+  sessionId = id;
+  createdAt = Date.now();
+  messages = [];
+  console.log(`[SessionStore] Initialized session: ${sessionId}`);
 }
 
-// ── Helper functions ────────────────────────────────────────────────────────
-function ensureSessionDirExists(): void {
-  if (!fs.existsSync(config.session.storageDir)) {
-    fs.mkdirSync(config.session.storageDir, { recursive: true });
-  }
+/**
+ * Add a message to the current session
+ */
+export function addMessage(role: Message["role"], content: string): void {
+  messages.push({ role, content });
 }
 
-function getSessionFilePath(sessionId: string): string {
-  // Sanitize session ID to ensure it's safe for filenames
-  const safeName = sessionId.replace(/[^a-zA-Z0-9-_]/g, "");
-  return path.join(config.session.storageDir, `${safeName}.json`);
+/**
+ * Clear all messages in the current session
+ */
+export function clearMessages(): void {
+  messages = [];
+  console.log(`[SessionStore] Cleared all messages`);
 }
 
-// ── Startup cleanup ─────────────────────────────────────────────────────────
-// Clean up expired sessions on startup
-function cleanupExpiredSessions(): void {
-  if (!fs.existsSync(config.session.storageDir)) {
-    return; // No sessions directory yet
+// File Persistence
+
+/**
+ * Save current session to file
+ */
+export function saveSession(): void {
+  if (!sessionId || messages.length === 0) {
+    console.log("\n[SessionStore] No messages to save\n");
+    return;
   }
 
+  const storageDir = config.session.storageDir;
+
+  // Ensure directory exists
+  if (!fs.existsSync(storageDir)) {
+    fs.mkdirSync(storageDir, { recursive: true });
+  }
+
+  const session = {
+    sessionId,
+    createdAt,
+    messages,
+  };
+
+  const filePath = path.join(storageDir, `${sessionId}.json`);
+  fs.writeFileSync(filePath, JSON.stringify(session, null, 2));
+  console.log(
+    `[SessionStore] Saved ${messages.length} messages to ${sessionId}.json`,
+  );
+}
+
+/**
+ * Clean up expired session files based on TTL
+ */
+export function cleanupExpiredSessions(): void {
+  const storageDir = config.session.storageDir;
+
+  if (!fs.existsSync(storageDir)) {
+    return;
+  }
+
+  const files = fs.readdirSync(storageDir);
   const now = Date.now();
-  const files = fs.readdirSync(config.session.storageDir);
-  let deletedCount = 0;
+  const ttl = config.session.ttl;
 
   for (const file of files) {
     if (!file.endsWith(".json")) continue;
 
-    const filePath = path.join(config.session.storageDir, file);
+    const filePath = path.join(storageDir, file);
+
     try {
       const data = fs.readFileSync(filePath, "utf-8");
-      const sessionFile: SessionFile = JSON.parse(data);
+      const session = JSON.parse(data);
 
-      // Check if TTL has expired
-      if (now - sessionFile.lastAccessed > config.session.ttl) {
+      console.log(now - session.createdAt + "\n" + ttl);
+      // Check if session has expired
+      if (now - session.createdAt > ttl) {
         fs.unlinkSync(filePath);
-        deletedCount++;
-        console.log(
-          `[SessionStore] Deleted expired session: ${sessionFile.sessionId}`,
-        );
       }
     } catch (error) {
-      // If file is corrupted, delete it
-      console.error(
-        `[SessionStore] Corrupted session file ${file}, deleting...`,
-      );
-      fs.unlinkSync(filePath);
-      deletedCount++;
+      console.error(`[SessionStore] Error processing ${file}:`, error);
     }
   }
-
-  if (deletedCount > 0) {
-    console.log(
-      `[SessionStore] Cleaned up ${deletedCount} expired session(s) on startup`,
-    );
-  }
 }
 
-// Run cleanup on module load (startup)
-cleanupExpiredSessions();
+// Shutdown
 
-// ── Periodic cleanup ────────────────────────────────────────────────────────
-// Automatically runs every hour to remove stale sessions
-const cleanupInterval = setInterval(() => {
-  cleanupExpiredSessions();
-}, config.session.cleanupInterval);
-
-// Don't keep Node.js process alive just for cleanup
-cleanupInterval.unref();
-
-// ── Session history factory ─────────────────────────────────────────────────
-// Returns a FileChatMessageHistory bound to a specific sessionId.
-// RunnableWithMessageHistory calls this function on every invoke(),
-// so the same session across multiple turns always uses the same file.
-export function getMessageHistory(sessionId: string): BaseChatMessageHistory {
-  return new FileChatMessageHistory(sessionId);
-}
-
-// ── Session management utilities ────────────────────────────────────────────
-export function clearSession(sessionId: string): boolean {
-  const filePath = getSessionFilePath(sessionId);
-  if (fs.existsSync(filePath)) {
-    fs.unlinkSync(filePath);
-    return true;
-  }
-  return false;
-}
-
-export function getSessionCount(): number {
-  if (!fs.existsSync(config.session.storageDir)) {
-    return 0;
-  }
-  const files = fs.readdirSync(config.session.storageDir);
-  return files.filter((f) => f.endsWith(".json")).length;
-}
-
-export function getAllSessionIds(): string[] {
-  if (!fs.existsSync(config.session.storageDir)) {
-    return [];
-  }
-
-  const files = fs.readdirSync(config.session.storageDir);
-  const sessionIds: string[] = [];
-
-  for (const file of files) {
-    if (!file.endsWith(".json")) continue;
-
-    try {
-      const filePath = path.join(config.session.storageDir, file);
-      const data = fs.readFileSync(filePath, "utf-8");
-      const sessionFile: SessionFile = JSON.parse(data);
-      sessionIds.push(sessionFile.sessionId);
-    } catch (error) {
-      // Skip corrupted files
-    }
-  }
-
-  return sessionIds;
-}
-
-// ── Graceful shutdown ───────────────────────────────────────────────────────
+/**
+ * Save session and cleanup before shutdown
+ */
 export async function closeStore(): Promise<void> {
-  clearInterval(cleanupInterval);
-  console.log("[SessionStore] Shutdown complete (sessions preserved in files)");
+  console.log("\n\n[SessionStore] Saving session before shutdown...");
+  saveSession();
+  console.log("[SessionStore] Shutdown complete");
 }
